@@ -76,6 +76,7 @@ def _db() -> sqlite3.Connection:
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA synchronous=NORMAL")
     c.execute("CREATE TABLE IF NOT EXISTS audits(id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
     return c
 
 
@@ -94,4 +95,20 @@ def load_audit(audit_id: str) -> dict | None:
 def list_audits(limit: int = 25) -> list[dict]:
     with closing(_db()) as c:
         rows = c.execute("SELECT payload FROM audits ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+
+def count_audits_since(iso_day: str) -> int:
+    with closing(_db()) as c:
+        return c.execute("SELECT COUNT(*) FROM audits WHERE created_at >= ?", (iso_day,)).fetchone()[0]
+
+
+def save_message(m: dict) -> None:
+    with closing(_db()) as c, c:
+        c.execute("INSERT INTO messages(created_at, payload) VALUES (?,?)", (m["created_at"], json.dumps(m, ensure_ascii=False)))
+
+
+def list_messages(limit: int = 25) -> list[dict]:
+    with closing(_db()) as c:
+        rows = c.execute("SELECT payload FROM messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return [json.loads(r[0]) for r in rows]

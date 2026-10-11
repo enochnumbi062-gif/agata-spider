@@ -76,6 +76,17 @@ def create_pdf(audit: dict) -> bytes:
                   Paragraph(escape(ai.get("summary", "")).replace("\n", "<br/>"), body)]
         story += [Paragraph("• " + escape(str(r)), body) for r in ai.get("recommendations", [])]
 
+    hosts = audit.get("hosts") or []
+    if hosts:
+        story.append(Paragraph("Hôtes et services observés", h2))
+        rows = [[p(x, small) for x in ("Hôte", "Adresse IP", "MAC", "Ports (état)")]]
+        for h in hosts:
+            rows.append([p(h.get("name"), body), p(h.get("ip"), body), p(h.get("mac") or "n/a", body),
+                         p(", ".join(f"{x['port']}/{x['service']} {x['state']}" for x in h.get("ports", [])), body)])
+        ht = Table(rows, colWidths=[24 * mm, 30 * mm, 36 * mm, 78 * mm], repeatRows=1)
+        ht.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef4")), ("GRID", (0, 0), (-1, -1), .3, LINE),
+                                ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4)]))
+        story.append(ht)
     story.append(Paragraph("Constats", h2))
     if not findings:
         story.append(p("Aucun constat n'est disponible pour cet audit.", body))

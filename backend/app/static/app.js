@@ -7,21 +7,25 @@ const MODULES = [
   ["01", "Global Command Center", "État de l'API, du mode et de la politique de contrôle.", 1],
   ["02", "Asset & IP Explorer", "Inventaire des actifs (échantillon illustratif).", 1],
   ["03", "Security Audit Engine", "Audit de démonstration ou contrôle TCP dans le périmètre autorisé.", 1],
-  ["04", "3D Attack Surface", "Relations et chemins confirmés entre actifs.", 0],
+  ["04", "3D Attack Surface", "Relations et chemins confirmés entre actifs.", 1],
   ["05", "AgAtA Intelligence", "Synthèse IA (Gemini) jointe aux audits authentifiés.", 1],
-  ["06", "Virtual Lab", "Simulations isolées et reproductibles.", 0],
+  ["06", "Virtual Lab", "Simulations isolées et reproductibles.", 1],
   ["07", "Report Studio", "Rapport PDF structuré, avec empreinte SHA-256.", 1],
   ["08", "Telegram & Alerts", "Livraison du rapport au chat administrateur.", 1],
-  ["09", "Subscription & Licensing", "Licences, quotas et abonnements.", 0],
+  ["09", "Subscription & Licensing", "Licences, quotas et abonnements.", 1],
   ["10", "Zero Trust Center", "Session par jeton et intégrité du journal d'audit.", 1],
-  ["11", "Vulnerability Intelligence", "CVE, avis éditeurs et priorisation.", 0],
-  ["12", "Communication Hub", "Support et notifications consenties.", 0],
+  ["11", "Vulnerability Intelligence", "CVE, avis éditeurs et priorisation.", 1],
+  ["12", "Communication Hub", "Support et notifications consenties.", 1],
   ["13", "Performance Lab", "Images par seconde et qualité de rendu.", 1],
-  ["14", "Compliance Center", "Contrôles et écarts de conformité.", 0],
+  ["14", "Compliance Center", "Contrôles et écarts de conformité.", 1],
   ["15", "À propos & gouvernance", "Version, responsabilités et auteur.", 1],
 ];
-let token = "", last = null, status = null, sel = 0;
-let focusNode = () => {};
+const store = {
+  get() { try { return sessionStorage.getItem("agata_t") || ""; } catch { return ""; } },
+  set(v) { try { v ? sessionStorage.setItem("agata_t", v) : sessionStorage.removeItem("agata_t"); } catch { /* stockage indisponible */ } },
+};
+let token = store.get(), last = null, status = null, sel = 0;
+let focusNode = () => {}, setSurface = () => {};
 const perf = { fps: 0, set() {} };
 const logEl = $("#feed");
 
@@ -29,13 +33,17 @@ function log(msg, kind = "") {
   logEl.prepend(el("div", { className: "ln " + kind, textContent: `${new Date().toLocaleTimeString("fr-FR")}  ${msg}` }));
   while (logEl.children.length > 40) logEl.lastChild.remove();
 }
+function say(msg, kind = "") { const m = $("#msg"); m.textContent = msg; m.className = "msg " + kind; log(msg, kind); }
 async function api(path, opts = {}) {
   const headers = { ...(opts.body ? { "Content-Type": "application/json" } : {}), ...(token ? { Authorization: "Bearer " + token } : {}) };
   const r = await fetch(path, { ...opts, headers, cache: "no-store" });
   if (!r.ok) {
     let d = r.statusText;
     try { d = (await r.json()).detail || d; } catch { /* corps non JSON */ }
-    throw new Error(`${r.status} — ${typeof d === "string" ? d : "requête invalide"}`);
+    if (Array.isArray(d)) d = d.map((x) => `${(x.loc || []).slice(1).join(".")} ${x.msg}`).join(" ; ");
+    if (r.status === 401) { token = ""; store.set(""); $("#auth").textContent = "non"; }
+    const err = new Error(r.status === 401 ? "Jeton absent ou refusé : ouvrez la session dans le module 10." : `${r.status} — ${d}`);
+    err.status = r.status; throw err;
   }
   return r;
 }
@@ -53,10 +61,12 @@ const note = (t) => el("p", { className: "mut", textContent: t });
 const need = () => { if (!last) throw new Error("Créez d'abord un audit."); };
 function btn(label, fn, cls = "") {
   const b = el("button", { className: "action " + cls, textContent: label, type: "button" });
-  b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { log(e.message, "bad"); } finally { b.disabled = false; } };
+  b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { if (e.status === 401) show(9); say(e.message, "bad"); } finally { b.disabled = false; } };
   return b;
 }
-const findingsView = (a) => [kv("Audit", `${a.audit_id.slice(0, 8)} · ${a.status}`),
+const hostsView = (hs) => hs.map((h) => el("div", { className: "find " + (h.simulated ? "info" : "low") }, el("b", { textContent: `${h.name} · ${h.ip}` }),
+  el("small", { textContent: `MAC ${h.mac ?? "n/a"} · ${h.ports.map((p) => `${p.port}/${p.service} ${p.state}`).join(", ")}` })));
+const findingsView = (a) => [kv("Audit", `${a.audit_id.slice(0, 8)} · ${a.status}`), ...hostsView(a.hosts ?? []),
   ...a.findings.map((f) => el("div", { className: "find " + f.severity }, el("b", { textContent: `${f.severity.toUpperCase()} · ${f.title}` }), el("small", { textContent: f.evidence })))];
 
 const VIEWS = {
@@ -69,31 +79,86 @@ const VIEWS = {
     const run = (path, payload) => async () => {
       last = await (await api(path, { method: "POST", body: JSON.stringify(payload()) })).json();
       $("#riskCount").textContent = String(last.findings.length).padStart(2, "0");
-      out.replaceChildren(...findingsView(last)); log(`Audit ${last.audit_id.slice(0, 8)} — ${last.status}`, "ok");
+      out.replaceChildren(...findingsView(last)); setSurface(last.hosts); say(`Audit ${last.audit_id.slice(0, 8)} — ${last.status}`, "ok");
     };
     return [btn("Créer un audit démo (simulé)", run("/v1/audits/demo", () => ({ target_label: "LAB-DEMO" }))), el("hr"),
-      note("Contrôle TCP réel : jeton requis, cible et ports dans la liste blanche."), t, p, g,
+      note(status?.active_checks_enabled === false ? "Contrôles actifs verrouillés côté serveur : définissez AGATA_ACTIVE_CHECKS=true, AGATA_ALLOWED_TARGETS et AGATA_ALLOWED_PORTS sur Render." : "Contrôle TCP réel : jeton requis, cible et ports dans la liste blanche."), t, p, g,
       el("label", { className: "chk" }, c, " J'atteste disposer d'une autorisation écrite"),
       btn("Lancer le contrôle TCP", run("/v1/audits/connect-check", () => ({ target: t.value.trim(), ports: p.value.split(",").map((x) => parseInt(x, 10)).filter(Number.isInteger), engagement_id: g.value.trim(), authorization_confirmed: c.checked })), "warn"), out];
   },
   "05": () => [kv("Gemini", status?.gemini_configured ? "configuré" : "non configuré"), note("La synthèse IA est ajoutée aux audits des sessions authentifiées. Elle est consultative et ne constitue pas une preuve.")],
-  "07": () => [btn("Télécharger le rapport PDF", async () => { need(); const r = await api(`/v1/audits/${last.audit_id}/report.pdf`); const u = URL.createObjectURL(await r.blob()); el("a", { href: u, download: `AgAtA-SpiDeR-${last.audit_id.slice(0, 8)}.pdf` }).click(); setTimeout(() => URL.revokeObjectURL(u), 5000); log("Rapport PDF téléchargé.", "ok"); }), note("Le PDF contient l'empreinte SHA-256 des constats.")],
-  "08": () => [btn("Envoyer le PDF sur Telegram", async () => { need(); const d = await (await api(`/v1/audits/${last.audit_id}/telegram`, { method: "POST" })).json(); log(d.sent ? "PDF envoyé sur Telegram." : d.reason, d.sent ? "ok" : "bad"); }), note("Jeton requis. Le destinataire est configuré côté serveur.")],
+  "07": () => [btn("Télécharger le rapport PDF", async () => { need(); const r = await api(`/v1/audits/${last.audit_id}/report.pdf`); const u = URL.createObjectURL(await r.blob()); el("a", { href: u, download: `AgAtA-SpiDeR-${last.audit_id.slice(0, 8)}.pdf` }).click(); setTimeout(() => URL.revokeObjectURL(u), 5000); say("Rapport PDF téléchargé.", "ok"); }), note("Le PDF contient l'empreinte SHA-256 des constats.")],
+  "08": () => [kv("Telegram", status?.telegram_configured ? "configuré" : "non configuré"),
+    btn("Envoyer le PDF sur Telegram", async () => { need(); const d = await (await api(`/v1/audits/${last.audit_id}/telegram`, { method: "POST" })).json(); say(d.sent ? "PDF envoyé sur Telegram." : d.reason, d.sent ? "ok" : "bad"); }),
+    btn("Tester la notification", async () => { const d = await (await api("/v1/notify/test", { method: "POST" })).json(); say(d.sent ? "Notification envoyée." : d.reason, d.sent ? "ok" : "bad"); }),
+    note("Jeton requis. Le bot doit avoir reçu /start depuis le chat administrateur.")],
   "10": () => {
     const i = el("input", { type: "password", placeholder: "Jeton API", autocomplete: "off" });
     return [note("Le jeton reste en mémoire, jamais stocké. Il protège les contrôles actifs, les audits réels, Telegram et l'intégrité."), i,
       btn("Ouvrir la session et vérifier l'intégrité", async () => {
-        token = i.value.trim(); i.value = "";
-        try { const d = await (await api("/v1/integrity")).json(); $("#auth").textContent = "oui"; log(`Session ouverte — journal ${d.valid ? "intègre" : "ALTÉRÉ"} (${d.records} enregistrements)`, d.valid ? "ok" : "bad"); }
-        catch (e) { token = ""; $("#auth").textContent = "non"; throw e; }
+        token = i.value.trim(); i.value = ""; store.set(token);
+        try { const d = await (await api("/v1/integrity")).json(); $("#auth").textContent = "oui"; say(`Session ouverte — journal ${d.valid ? "intègre" : "ALTÉRÉ"} (${d.records} enregistrements)`, d.valid ? "ok" : "bad"); }
+        catch (e) { token = ""; store.set(""); $("#auth").textContent = "non"; throw e; }
       })];
   },
   "13": () => [kv("Images/s", perf.fps), btn("Qualité réduite", () => perf.set(0.6)), btn("Qualité haute", () => perf.set(1))],
   "15": () => [kv("Version", status?.version ?? "—"), note("Conçu par Dr Enoch Numbi, fondateur de l'écosystème DorkNet, architecte système et chercheur en cybersécurité (Kinshasa, RDC)."), note("Journal d'audit chaîné SHA-256, politique fail-closed, périmètre explicitement autorisé.")],
 };
 
+Object.assign(VIEWS, {
+  "04": () => {
+    const o = el("div");
+    const load = async () => { const d = await (await api("/v1/graph")).json(); setSurface(d.hosts); o.replaceChildren(...hostsView(d.hosts)); say(`${d.hosts.length} hôte(s) sur la toile${d.sample ? " (échantillon simulé)" : ""}.`, "ok"); };
+    load().catch((e) => say(e.message, "bad"));
+    return [o, btn("Actualiser la surface", load), note("Vert : hôte réel · orange : simulé. Points verts : ports ouverts, gris : fermés, ambre : filtrés. La MAC n'est connue que pour un voisin du même réseau local.")];
+  },
+  "06": () => {
+    const s = el("input", { placeholder: "Graine (entier)", value: "42", inputMode: "numeric" }), n = el("input", { placeholder: "Hôtes (1 à 12)", value: "5", inputMode: "numeric" }), out = el("div");
+    return [note("Topologie virtuelle reproductible : même graine, même résultat. Aucun paquet n'est envoyé."), s, n,
+      btn("Lancer la simulation", async () => {
+        last = await (await api("/v1/lab/simulate", { method: "POST", body: JSON.stringify({ seed: parseInt(s.value, 10) || 0, hosts: parseInt(n.value, 10) || 5 }) })).json();
+        $("#riskCount").textContent = String(last.findings.length).padStart(2, "0"); setSurface(last.hosts); out.replaceChildren(...findingsView(last));
+        say(`Simulation ${last.audit_id.slice(0, 8)} : ${last.hosts.length} hôtes, ${last.findings.length} constats.`, "ok");
+      }), out];
+  },
+  "09": () => {
+    const o = el("div");
+    api("/v1/license").then((r) => r.json()).then((d) => o.replaceChildren(kv("Plan", d.plan), kv("Audits aujourd'hui", `${d.usage.audits_today} / ${d.limits.daily_audits}`), kv("Requêtes / min", d.limits.requests_per_min), kv("Opérations lourdes / min", d.limits.heavy_per_min), kv("Ports par contrôle", d.limits.ports_per_check))).catch((e) => say(e.message, "bad"));
+    return [o, note("Plan et quotas se règlent côté serveur : AGATA_PLAN, AGATA_DAILY_QUOTA, AGATA_RATE_PER_MIN.")];
+  },
+  "11": () => {
+    const q = el("input", { placeholder: "CVE-2021-44228 ou mot-clé (ex. openssl)", autocomplete: "off" }), out = el("div");
+    const go = async () => {
+      const d = await (await api("/v1/cve?q=" + encodeURIComponent(q.value.trim()))).json();
+      out.replaceChildren(...(d.items.length ? d.items.map((v) => el("div", { className: "find " + v.severity }, el("b", { textContent: `${v.id} · ${v.score ?? "?"} ${v.severity.toUpperCase()}` }), el("small", { textContent: `${v.published} — ${v.summary}` }))) : [note("Aucun résultat.")]));
+      say(`${d.items.length} résultat(s) NVD.`, "ok");
+    };
+    return [note("Source : base NVD du NIST, interrogée côté serveur."), q, btn("Rechercher", go), out];
+  },
+  "12": () => {
+    const m = el("input", { placeholder: "Votre message (10 caractères minimum)" }), c = el("input", { placeholder: "Contact (optionnel)", autocomplete: "off" }), k = el("input", { type: "checkbox" }), out = el("div");
+    if (token) api("/v1/support").then((r) => r.json()).then((d) => out.replaceChildren(...d.items.map((x) => el("div", { className: "find info" }, el("b", { textContent: `${x.created_at.slice(0, 16)} · ${x.contact || "anonyme"}` }), el("small", { textContent: x.message }))))).catch(() => {});
+    return [m, c, el("label", { className: "chk" }, k, " J'accepte d'être recontacté à propos de ce message"),
+      btn("Envoyer au support", async () => {
+        const d = await (await api("/v1/support", { method: "POST", body: JSON.stringify({ message: m.value.trim(), contact: c.value.trim(), consent: k.checked }) })).json();
+        m.value = ""; say(d.telegram_notified ? "Message enregistré et transmis sur Telegram." : "Message enregistré (Telegram non configuré).", "ok");
+      }), out];
+  },
+  "14": () => {
+    const out = el("div");
+    return [note("Auto-évaluation interne de la configuration, sans valeur de certification. Jeton requis."),
+      btn("Lancer l'évaluation", async () => {
+        last = await (await api("/v1/compliance/audit", { method: "POST" })).json();
+        $("#riskCount").textContent = String(last.findings.length).padStart(2, "0");
+        out.replaceChildren(...last.controls.map((c) => el("div", { className: "find " + (c.ok ? "low" : c.severity) }, el("b", { textContent: `${c.ok ? "CONFORME" : "ÉCART"} · ${c.control}` }), el("small", { textContent: c.ok ? "" : c.fix }))));
+        say(`Évaluation : ${last.status}.`, last.findings.some((f) => f.severity !== "info") ? "bad" : "ok");
+      }), out];
+  },
+});
+
 function show(i) {
   sel = i;
+  $("#msg").textContent = ""; $("#msg").className = "msg";
   const [id, name, desc, live] = MODULES[i];
   $("#dTitle").textContent = `${id} · ${name}`; $("#dDesc").textContent = desc;
   const b = $("#dBadge"); b.textContent = live ? "Actif" : "À venir"; b.className = "badge " + (live ? "on" : "off");
@@ -173,6 +238,32 @@ function initScene(renderer) {
   const orbit = new THREE.Group(); orbit.position.set(0, -0.3, 0); spider.add(orbit);
   [[2.9, 0x5cecff, 0.5], [3.5, 0xff5a87, 0.35], [4.1, 0x2f8fc4, 0.4]].forEach(([r, c, o], i) => { const m = new THREE.Mesh(new THREE.TorusGeometry(r, 0.012, 6, 160), new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: o })); m.rotation.set(1.1 + i * 0.35, i * 0.6, 0); orbit.add(m); });
 
+  // Surface d'attaque : hôtes (IP, MAC) et ports flottants sur la toile
+  const surface = new THREE.Group(); surface.position.z = -0.6; rig.add(surface);
+  const spin = [], PORT = { open: 0x37e6a0, closed: 0x6b8299 };
+  const label = (lines, w) => {
+    const c = document.createElement("canvas"); c.width = 512; c.height = 20 + lines.length * 36;
+    const x = c.getContext("2d"); x.fillStyle = "rgba(6,16,30,.8)"; x.fillRect(0, 0, c.width, c.height);
+    x.strokeStyle = "#5cecff"; x.strokeRect(1, 1, c.width - 2, c.height - 2); x.font = "bold 26px monospace";
+    lines.forEach((l, i) => { x.fillStyle = i ? "#b9d8ee" : "#5cecff"; x.fillText(String(l).slice(0, 30), 14, 36 + i * 36); });
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false }));
+    s.scale.set(w, (w * c.height) / c.width, 1); s.renderOrder = 5; return s;
+  };
+  setSurface = (hosts = []) => {
+    while (surface.children.length) { const o = surface.children[0]; surface.remove(o); o.traverse((m) => { m.geometry?.dispose(); m.material?.map?.dispose(); m.material?.dispose(); }); }
+    spin.length = 0;
+    const wide = innerWidth >= 860, rx = wide ? 4.6 : 1.7, ry = wide ? 3.4 : 2.6, cy = wide ? 0 : -1.4, list = hosts.slice(0, 8), pos = {};
+    list.forEach((h, j) => {
+      const a = (j / list.length) * TAU + 0.35, g = new THREE.Group(), ring = new THREE.Group(), open = h.ports.filter((p) => p.state === "open").map((p) => p.port);
+      g.position.set(Math.cos(a) * rx, Math.sin(a) * ry + cy, 0); pos[h.ip] = g.position;
+      g.add(new THREE.Mesh(new THREE.OctahedronGeometry(0.24), new THREE.MeshBasicMaterial({ color: h.simulated ? 0xffc266 : 0x37e6a0, wireframe: true })), ring);
+      h.ports.slice(0, 8).forEach((p, k, arr) => { const b = (k / arr.length) * TAU, m = new THREE.Mesh(new THREE.SphereGeometry(0.08, 10, 8), new THREE.MeshBasicMaterial({ color: PORT[p.state] ?? 0xffc266 })); m.position.set(Math.cos(b) * 0.65, Math.sin(b) * 0.65, 0); ring.add(m); });
+      const l = label([h.name, h.ip, "MAC " + (h.mac ?? "n/a"), open.length ? "ouverts " + open.join(" ") : "aucun port ouvert"], wide ? 2.6 : 2.2);
+      l.position.set(0, -1.1, 0.2); g.add(l); spin.push(ring); surface.add(g);
+    });
+    list.forEach((h) => { if (h.via && pos[h.via] && pos[h.ip]) surface.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pos[h.via], pos[h.ip]]), new THREE.LineBasicMaterial({ color: 0xffc266, transparent: true, opacity: 0.6 }))); });
+  };
+
   const pointer = { x: 0, y: 0 }, look = new THREE.Vector3(), lookT = new THREE.Vector3();
   addEventListener("pointermove", (e) => { pointer.x = e.clientX / innerWidth - 0.5; pointer.y = e.clientY / innerHeight - 0.5; }, { passive: true });
   focusNode = (i) => { picked = i; lookT.set(nodes[i].g.position.x * 0.1, nodes[i].g.position.y * 0.1, 0); };
@@ -201,6 +292,7 @@ function initScene(renderer) {
       L.ankle.rotation.z = -L.side * (0.4 + 0.12 * s);
     }
     orbit.rotation.set(Math.sin(t * 0.4) * 0.3, 0, t * 0.25);
+    spin.forEach((g, i) => { g.rotation.z = t * (0.7 + i * 0.08); }); surface.position.y = Math.sin(t * 0.6) * 0.12;
     dust.rotation.set(Math.sin(t * 0.1) * 0.05, t * 0.015, 0);
     camera.position.x += (pointer.x * 1.6 - camera.position.x) * 0.04; camera.position.y += (-pointer.y * 1.0 - camera.position.y) * 0.04;
     look.lerp(lookT, 0.04); camera.lookAt(look); key.position.x = 4 + Math.sin(t * 0.7) * 2;
@@ -218,5 +310,7 @@ let renderer = null;
 try { renderer = new THREE.WebGLRenderer({ canvas: $("#scene"), antialias: true, alpha: true, powerPreference: "high-performance" }); }
 catch { document.body.classList.add("no-webgl"); log("WebGL indisponible : interface 2D uniquement.", "bad"); }
 if (renderer) initScene(renderer);
-show(0); refreshStatus(); setInterval(refreshStatus, 30000);
+if (token) $("#auth").textContent = "oui";
+show(0); refreshStatus(); api("/v1/graph").then((r) => r.json()).then((d) => setSurface(d.hosts)).catch(() => {});
+setInterval(refreshStatus, 30000);
 log("Interface prête.");

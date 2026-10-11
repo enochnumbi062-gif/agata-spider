@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: agata-spider
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - { key: AGATA_MODE, value: enterprise }
+      - { key: AGATA_ACTIVE_CHECKS, value: "false" }
+      - { key: AGATA_ALLOWED_TARGETS, value: "127.0.0.1,localhost" }
+      - { key: AGATA_PROXY_HOPS, value: "1" }
+      - { key: AGATA_API_TOKEN, generateValue: true }
+      - { key: GEMINI_API_KEY, sync: false }
+      - { key: TELEGRAM_BOT_TOKEN, sync: false }
+      - { key: TELEGRAM_ADMIN_CHAT_ID, sync: false }

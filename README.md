@@ -33,4 +33,9 @@ Plan gratuit : le disque est éphémère, les audits (SQLite) et le journal sont
 Avec jeton : `GET /v1/audits` · `POST /v1/audits/connect-check` · `GET /v1/audits/{id}` · `GET /v1/audits/{id}/report.pdf` · `POST /v1/audits/{id}/telegram` · `GET /v1/integrity`
 
 ## Limites
-Pas de SSO/RBAC multi-tenant ni de base externe. Modules 04, 06, 09, 11, 12, 14 : affichés « À venir ». Le drapeau `authorization_confirmed` n'est pas une autorisation légale : l'accord écrit du propriétaire reste indispensable.
+Pas de SSO/RBAC multi-tenant ni de base externe. La MAC n'est connue que pour un voisin du même réseau local (table ARP). Le drapeau `authorization_confirmed` n'est pas une autorisation légale : l'accord écrit du propriétaire reste indispensable.
+
+## Endpoints ajoutés
+Publics : `GET /v1/graph` · `GET /v1/license` · `GET /v1/cve?q=` · `POST /v1/lab/simulate` · `POST /v1/support`
+Avec jeton : `POST /v1/compliance/audit` · `POST /v1/notify/test` · `GET /v1/support`
+Variables : `AGATA_PLAN`, `AGATA_DAILY_QUOTA`. Contrôle TCP réel : `AGATA_ACTIVE_CHECKS=true`, `AGATA_ALLOWED_TARGETS`, `AGATA_ALLOWED_PORTS`.

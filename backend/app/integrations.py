@@ -37,5 +37,41 @@ async def telegram_send_document(pdf: bytes, filename: str, caption: str = "") -
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(url, data={"chat_id": config.TELEGRAM_ADMIN_CHAT_ID, "caption": caption[:900]},
                               files={"document": (filename, pdf, "application/pdf")})
-        r.raise_for_status()
+        _tg_check(r)
     return True
+
+
+def _tg_check(r: httpx.Response) -> None:
+    if r.status_code != 200:
+        try:
+            desc = r.json().get("description", "")
+        except ValueError:
+            desc = ""
+        raise RuntimeError(f"Telegram : {desc or r.status_code}")
+
+
+async def telegram_send_text(text: str) -> bool:
+    if not (config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_ADMIN_CHAT_ID):
+        return False
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+    async with httpx.AsyncClient(timeout=15) as client:
+        _tg_check(await client.post(url, data={"chat_id": config.TELEGRAM_ADMIN_CHAT_ID, "text": text[:3500]}))
+    return True
+
+
+async def cve_search(q: str) -> list[dict]:
+    """Recherche NVD (NIST) : identifiant CVE exact ou mot-clé."""
+    params = {"cveId": q.upper()} if q.upper().startswith("CVE-") else {"keywordSearch": q, "resultsPerPage": 8}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get("https://services.nvd.nist.gov/rest/json/cves/2.0", params=params,
+                             headers={"User-Agent": "AgAtA-SpiDeR"})
+        r.raise_for_status()
+    out = []
+    for v in r.json().get("vulnerabilities", [])[:8]:
+        c = v.get("cve", {})
+        m = next((x for k in ("cvssMetricV31", "cvssMetricV40", "cvssMetricV30") for x in c.get("metrics", {}).get(k, [])), {})
+        d = m.get("cvssData", {})
+        out.append({"id": c.get("id"), "published": (c.get("published") or "")[:10], "score": d.get("baseScore"),
+                    "severity": str(d.get("baseSeverity") or "info").lower(),
+                    "summary": next((x["value"] for x in c.get("descriptions", []) if x.get("lang") == "en"), "")[:300]})
+    return out

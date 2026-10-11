@@ -41,3 +41,16 @@ class Finding(BaseModel):
     evidence: str
     simulated: bool = False
     recommendation: str = ""
+
+
+class SimRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    seed: int = Field(default=42, ge=0, le=2**31)
+    hosts: int = Field(default=5, ge=1, le=12)
+
+
+class SupportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=10, max_length=1000)
+    contact: str = Field(default="", max_length=120)
+    consent: bool

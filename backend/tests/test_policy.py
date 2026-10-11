@@ -50,3 +50,9 @@ def test_audit_chain_detects_tampering(tmp_path, monkeypatch):
     f = tmp_path / "audit.jsonl"
     f.write_text(f.read_text().replace('"a"', '"x"'))
     assert not auditlog.verify_chain()["valid"]
+
+
+def test_simulation_is_reproducible():
+    from app import lab
+    assert lab.simulate(7, 4) == lab.simulate(7, 4)
+    assert lab.simulate(7, 4) != lab.simulate(8, 4)

@@ -46,3 +46,5 @@ hr{border:0;border-top:1px solid #1b3550;margin:10px 0}
 #menu{display:flex;overflow-x:auto;gap:6px}#menu button{flex:none;white-space:nowrap}
 .detail{left:8px;right:8px;width:auto;bottom:calc(74px + var(--sb));max-height:40vh}}
 @media(prefers-reduced-motion:reduce){.hud,#menu button{animation:none}}
+.msg{padding:8px 10px;border-radius:10px;margin:6px 0;font-size:13px;background:#0f2338;border-left:3px solid #4a7fb5;overflow-wrap:anywhere}
+.msg:empty{display:none}.msg.ok{border-color:var(--ok)}.msg.bad{border-color:var(--bad);color:#ffd3de}

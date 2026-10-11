@@ -1,0 +1,17 @@
+# Secrets : ne jamais envoyer sur GitHub
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Données générées à l'exécution (audits, journal)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.jsonl

@@ -5,16 +5,17 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auditlog, config, security
-from .integrations import gemini_summary, telegram_send_document
+from . import auditlog, config, lab, security
+from .compliance import evaluate
+from .integrations import cve_search, gemini_summary, telegram_send_document, telegram_send_text
 from .policy import resolve_pinned, validate_connect_check
 from .reporting import create_pdf
-from .schemas import ConnectCheckRequest, DemoAuditRequest, Finding
+from .schemas import ConnectCheckRequest, DemoAuditRequest, Finding, SimRequest, SupportRequest
 
 STATIC = Path(__file__).parent / "static"
 AI_OFF = {"enabled": False, "summary": "Analyse IA non exécutée (session non authentifiée ou service non configuré).", "recommendations": []}
@@ -22,6 +23,7 @@ AI_DOWN = {"enabled": False, "summary": "Service IA indisponible ; audit conserv
 RL = [Depends(security.rate_limit)]
 AUTH = [Depends(security.rate_limit), Depends(security.require_token)]
 HEAVY = [Depends(security.heavy_limit), Depends(security.require_token)]
+PUBLIC_MODES = ("demo", "simulation")
 
 
 @asynccontextmanager
@@ -72,6 +74,8 @@ async def tcp_connect(ip: str, port: int, timeout: float = 1.5) -> dict:
 
 
 async def _finish(audit: dict, with_ai: bool) -> dict:
+    if await asyncio.to_thread(auditlog.count_audits_since, auditlog.utc_now()[:10]) >= config.DAILY_QUOTA:
+        raise HTTPException(429, "Quota quotidien d'audits atteint pour ce plan")
     audit["findings_hash_sha256"] = auditlog.canonical_hash(audit["findings"])
     audit["ai"] = AI_OFF
     if with_ai:
@@ -89,7 +93,7 @@ def _audit_or_404(audit_id: uuid.UUID, request: Request) -> dict:
     audit = auditlog.load_audit(str(audit_id))
     if not audit:
         raise HTTPException(404, "Audit not found")
-    if audit.get("mode") != "demo":
+    if audit.get("mode") not in PUBLIC_MODES:
         security.require_token(request)
     return audit
 
@@ -106,13 +110,18 @@ def status():
             "telegram_configured": bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_ADMIN_CHAT_ID)}
 
 
+def _asset(h: dict) -> dict:
+    op = ",".join(str(p["port"]) for p in h["ports"] if p["state"] == "open") or "aucun"
+    return {"id": h["name"], "kind": "hôte", "simulated": bool(h.get("simulated")),
+            "label": f"{h['ip']} · MAC {h.get('mac') or 'n/a'} · ouverts : {op}"}
+
+
 @app.get("/v1/assets", dependencies=RL)
-def assets():
-    return {"items": [
-        {"id": "LAB-WEB-01", "label": "Service web de test local", "kind": "service", "simulated": True},
-        {"id": "LAB-DB-01", "label": "Nœud de base de données exemple", "kind": "database", "simulated": True},
-        {"id": "LAB-ID-01", "label": "Fournisseur d'identité exemple", "kind": "identity", "simulated": True}],
-        "note": "Inventaire illustratif ; branchez une source de découverte approuvée."}
+def assets(request: Request):
+    hosts = lab.simulate(1, 3)[0]
+    if security.has_valid_token(request):
+        hosts = [h for a in auditlog.list_audits(25) for h in a.get("hosts", []) if not h.get("simulated")] + hosts
+    return {"items": [_asset(h) for h in hosts], "note": "Hôtes réels issus de vos audits (session ouverte) + échantillon simulé."}
 
 
 @app.get("/v1/integrity", dependencies=AUTH)
@@ -140,7 +149,7 @@ async def demo_audit(req: DemoAuditRequest, request: Request):
                 recommendation="Appliquer les profils TLS approuvés et les guides éditeurs à jour.")]
     audit = {"audit_id": str(uuid.uuid4()), "created_at": auditlog.utc_now(), "mode": "demo",
              "target_label": req.target_label, "status": "completed_simulated",
-             "findings": [f.model_dump() for f in findings]}
+             "findings": [f.model_dump() for f in findings], "hosts": lab.simulate(1, 3)[0]}
     return await _finish(audit, security.has_valid_token(request))
 
 
@@ -170,9 +179,12 @@ async def connect_check(req: ConnectCheckRequest, request: Request):
                         evidence=r["evidence"],
                         recommendation="Confirmer le propriétaire du service et comparer l'exposition à la politique approuvée.")
                 for r in results]
+    host = {"ip": addrs[0], "name": target, "mac": await asyncio.to_thread(lab.mac_for, addrs[0]), "via": None,
+            "simulated": False, "ports": [{"port": r["port"], "state": r["state"], "service": lab.SERVICES.get(r["port"], "tcp")}
+                                          for r in results]}
     audit = {"audit_id": str(uuid.uuid4()), "created_at": auditlog.utc_now(), "mode": config.MODE, "target": target,
              "resolved": addrs[:4], "engagement_id": req.engagement_id, "status": "completed",
-             "findings": [f.model_dump() for f in findings]}
+             "findings": [f.model_dump() for f in findings], "hosts": [host]}
     return await _finish(audit, True)
 
 
@@ -198,11 +210,98 @@ async def send_to_telegram(audit_id: uuid.UUID, request: Request):
     try:
         sent = await telegram_send_document(pdf, f"AgAtA-SpiDeR-{str(audit_id)[:8]}.pdf",
                                             f"Audit {str(audit_id)[:8]} — {audit['status']}")
-    except Exception:
+    except Exception as e:
         auditlog.append_event({"event": "telegram_delivery_failed", "audit_id": str(audit_id)})
-        raise HTTPException(502, "Telegram delivery failed; check server logs and configuration")
+        raise HTTPException(502, str(e) if isinstance(e, RuntimeError) else "Telegram injoignable")
     auditlog.append_event({"event": "telegram_delivery", "audit_id": str(audit_id), "sent": sent})
     return {"sent": sent, "reason": None if sent else "Identifiants Telegram non configurés"}
+
+
+@app.post("/v1/lab/simulate", dependencies=[Depends(security.heavy_limit)])
+async def lab_simulate(req: SimRequest, request: Request):
+    hosts, findings = lab.simulate(req.seed, req.hosts)
+    findings = findings or [Finding(title="Aucun service sensible exposé", severity="info",
+                                    description="La topologie simulée n'expose aucun service à risque connu.",
+                                    evidence=f"SIMULÉ (graine {req.seed}).", simulated=True).model_dump()]
+    audit = {"audit_id": str(uuid.uuid4()), "created_at": auditlog.utc_now(), "mode": "simulation",
+             "target_label": f"Lab graine {req.seed}", "seed": req.seed, "status": "completed_simulated",
+             "findings": findings, "hosts": hosts}
+    return await _finish(audit, security.has_valid_token(request))
+
+
+@app.get("/v1/graph", dependencies=RL)
+def graph(request: Request):
+    authed = security.has_valid_token(request)
+    seen, out = set(), []
+    for a in auditlog.list_audits(25):
+        if authed or a.get("mode") in PUBLIC_MODES:
+            for h in a.get("hosts", []):
+                if h["ip"] not in seen:
+                    seen.add(h["ip"])
+                    out.append(h)
+    if not out:
+        return {"hosts": lab.simulate(1, 3)[0], "sample": True, "authenticated": authed}
+    return {"hosts": out[:16], "sample": False, "authenticated": authed}
+
+
+@app.get("/v1/license", dependencies=RL)
+def license_info():
+    return {"plan": config.PLAN, "limits": {"daily_audits": config.DAILY_QUOTA, "requests_per_min": config.RATE_PER_MIN,
+                                            "heavy_per_min": config.HEAVY_PER_MIN, "ports_per_check": 10},
+            "usage": {"audits_today": auditlog.count_audits_since(auditlog.utc_now()[:10])}}
+
+
+@app.get("/v1/cve", dependencies=[Depends(security.heavy_limit)])
+async def cve(q: str = Query(min_length=2, max_length=80, pattern=r"^[\w .:\-/+]+$")):
+    try:
+        return {"items": await cve_search(q.strip())}
+    except Exception:
+        raise HTTPException(502, "Source NVD indisponible ou limitée ; réessayez dans une minute")
+
+
+@app.post("/v1/support", dependencies=[Depends(security.heavy_limit)])
+async def support(req: SupportRequest):
+    if not req.consent:
+        raise HTTPException(422, "Le consentement est requis pour être recontacté")
+    await asyncio.to_thread(auditlog.save_message, {"created_at": auditlog.utc_now(), "message": req.message, "contact": req.contact})
+    auditlog.append_event({"event": "support_message"})
+    try:
+        notified = await telegram_send_text("Support AgAtA-SpiDeR\n" + req.message + (f"\nContact : {req.contact}" if req.contact else ""))
+    except Exception:
+        notified = False
+    return {"stored": True, "telegram_notified": notified}
+
+
+@app.get("/v1/support", dependencies=AUTH)
+def support_list():
+    return {"items": auditlog.list_messages(25)}
+
+
+@app.post("/v1/notify/test", dependencies=HEAVY)
+async def notify_test():
+    try:
+        sent = await telegram_send_text("AgAtA-SpiDeR : test de notification réussi.")
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    except Exception:
+        raise HTTPException(502, "Telegram injoignable")
+    return {"sent": sent, "reason": None if sent else "Identifiants Telegram non configurés sur le serveur"}
+
+
+@app.post("/v1/compliance/audit", dependencies=HEAVY)
+async def compliance_audit(request: Request):
+    https = request.headers.get("x-forwarded-proto") == "https" or request.url.scheme == "https"
+    controls = await asyncio.to_thread(evaluate, https)
+    bad = [c for c in controls if not c["ok"]]
+    findings = [Finding(title=c["control"], severity=c["severity"], evidence="Contrôle calculé sur la configuration en cours.",
+                        description="Écart détecté par l'auto-évaluation interne (ne constitue pas une certification).",
+                        recommendation=c["fix"]).model_dump() for c in bad]
+    findings = findings or [Finding(title="Aucun écart détecté", severity="info", evidence="Tous les contrôles internes sont conformes.",
+                                    description="Auto-évaluation interne, ne constitue pas une certification.").model_dump()]
+    audit = {"audit_id": str(uuid.uuid4()), "created_at": auditlog.utc_now(), "mode": "compliance",
+             "target_label": "Déploiement AgAtA-SpiDeR", "status": f"{len(controls) - len(bad)}/{len(controls)} contrôles conformes",
+             "findings": findings, "controls": controls}
+    return await _finish(audit, False)
 
 
 @app.get("/", include_in_schema=False)
